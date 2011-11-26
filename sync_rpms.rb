@@ -74,7 +74,6 @@ class RPM_Repository
   # Returns a list of files that need to be signed using rpm
   def download_file(file_uri, dest_dir)
     uri = URI.parse(file_uri)
-    rpms_to_sign = []
     Net::HTTP.start(uri.host) { |http|
       resp = http.get(uri.request_uri)
       if resp.code != "200" then
