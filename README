@@ -1,0 +1,14 @@
+
+sync_rpms.rb
+------------
+Synchronize RPMs from a remote yum repository to a yum repo on this machine.
+
+Does this by:
+
+1. Downloading .../repodata/filelists.xml.gz
+
+2. Given the files in filelists.xml.gz, if a file matches the regex specified in
+   the command line options, then:
+
+   a. Check to see if the file already exists locally. If it does not, then
+      download file and sign it using rpm --addsign
