@@ -12,3 +12,42 @@ Does this by:
 
    a. Check to see if the file already exists locally. If it does not, then
       download file and sign it using rpm --addsign
+
+
+
+
+purge_rpms.rb
+-------------
+Purge rpm files from a yum repository.  Provides ability to specify rules so that different retention policies can
+be enforced, meaning that you can specify that you want to keep the last 30 versions of lsof but only the last
+3 versions of kernel.
+
+Usage: ./purge_rpms.rb [arguments]
+    -h, --help                       Show this message
+    -d, --dir=DIRECTORY              DIRECTORY to purge rpm files from
+    -v                               Print information about what is happening.
+                                     Use multiple times for additional verbosity (e.g. -vvv)
+        --rule=['FILE_REGEX,NUM_TO_KEEP']
+                                     Rule pair which consists of a regular expression describing
+                                     a group of rpm files and how many files of this type to keep.
+                                     By default, the last 5 versions of a rpm group are kept
+                                     Multiple instances of --rule may be specified for different groups of rpm files
+        --dry-run                    Show what would occur, but do not actually remove any files
+
+Examples: ./purge_rpms.rb --dir=/www/yum/5/x86_64 --rule='vmware.*,2' --rule='lsof.*,1'
+          This would search in the /www/yum/5/x86_64 directory:
+          -keeping 2 copies of all rpms with a %{NAME} matching the regex 'vmware.*'
+          -keeping 1 copy of all rpms with a %{NAME} matching the regex 'lsof.*'
+          -keeping 5 copies of all other rpms (the default rule)
+
+          ./purge_rpms.rb --dir=/www/yum/4/i386 --rule='lsof.*,1' --rule='lsof.*,10'
+          This would search in the /www/yum/4/i386 directory:
+          -keeping 1 copy of all rpms with a %{NAME} matching the regex 'lsof.*'
+           (this is because the first matching rule wins)
+          -keeping 5 copies of all other rpms (the default rule)
+
+          ./purge_rpms.rb --dir=/www/yum/5/x86_64 --rule='lsof.*,10' --rule='.*,3'
+          This would search in the /www/yum/5/x86_64 directory:
+          -keeping 10 copies of all rpms with a %{NAME} matching the regex 'lsof.*'
+          -keeping 3 copies of all other rpms (overriding the default rule)
+
