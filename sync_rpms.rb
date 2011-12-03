@@ -16,11 +16,39 @@ require 'optparse'
 require 'ostruct'
 require 'rexml/document'
 require 'net/http'
+require 'net/smtp'
 require 'uri'
 require 'zlib'
+require 'etc'
+require 'socket'
 require 'open3'
 include REXML
 include Open3
+
+
+class Logger
+
+  @@verbosity_level = 0
+
+  def Logger.increase_verbosity
+    @@verbosity_level += 1
+  end
+
+  def Logger.formatted_message(level, msg)
+    formatted_msg  = " "
+    formatted_msg += '*' * level
+    formatted_msg += " "
+    formatted_msg += msg
+    formatted_msg
+  end
+
+  def Logger.log(level, msg)
+    if @@verbosity_level >= level then
+     puts Logger.formatted_message(level, msg)
+    end
+  end
+
+end # class Logger
 
 
 class RPM_Repository
@@ -42,16 +70,17 @@ class RPM_Repository
     Net::HTTP.start(filelist_uri.host) { |http|
       resp = http.get(filelist_uri.request_uri)
       if resp.code != "200" then
-        raise " ** HTTP request to #{filelist_uri} returned HTTP code: #{resp.code}: #{resp.body}"
+        raise Logger.formatted_message(2, "HTTP request to #{filelist_uri} returned HTTP code: #{resp.code}: #{resp.body}")
       end
       data = resp.body
+
       # Decompress .gz file
       zstream = Zlib::Inflate.new(15+32)    # if you dont specify window_bits=15+32, then Zlib::DataError will be thrown
       xml_as_string = zstream.inflate(data)
       zstream.finish
       zstream.close
     }
-    log(" *  Got index #{filelist_uri}")
+    Logger.log(1, "Got index #{filelist_uri}")
 
     filenames = []
     xmldoc = Document.new(xml_as_string)
@@ -63,7 +92,7 @@ class RPM_Repository
         filename += pkg_e.attributes["arch"] + ".rpm"
         if (/#{regex_pattern}/.match(filename)) then
           uri = repo_uri + "/" + filename
-          log(" *  Adding to download list: #{uri}")
+          Logger.log(1, "Adding to download list: #{uri}")
           filenames.push(uri)
         end 
       }
@@ -71,47 +100,102 @@ class RPM_Repository
     return filenames
   end
 
-  # Returns a list of files that need to be signed using rpm
   def download_file(file_uri, dest_dir)
     uri = URI.parse(file_uri)
     Net::HTTP.start(uri.host) { |http|
       resp = http.get(uri.request_uri)
       if resp.code != "200" then
-        raise " ** HTTP request to #{file_uri} returned HTTP code: #{resp.code}: #{resp.body}"
+        raise Logger.formatted_message(2, "HTTP request to #{file_uri} returned HTTP code: #{resp.code}: #{resp.body}")
       end
       dest_file = dest_dir + "/" + File.basename(uri.path)
       if File.exist?(dest_file) then
-        log(" *  RPM #{dest_file} already downloaded")
+        Logger.log(1, "RPM #{dest_file} already downloaded")
       else
         open(dest_file, "wb") { |dest| dest.write(resp.body) }
-        log(" *  Downloaded #{file_uri} to #{dest_file}")
-        if @options[:sign] == true then
-          log(" *  Calling /bin/rpm --addsign #{dest_file}:")
-          popen3('/bin/rpm', '--addsign', dest_file) do |stdin, stdout, stderr, waitthread|
-            stdin.close_write
-            print stdout.read
-            errors = stderr.read
-            errors.gsub!(/^gpg: WARNING: standard input reopened\n/, "")
-            print errors
+        Logger.log(1, "Downloaded #{file_uri} to #{dest_file}")
+        puts "notify_emails=\"#{@options[:notify_emails]}"
+        if @options[:notify_emails].nil? == false then
+          @options[:notify_emails].gsub(/ /,'').split(",").each do |recipient|
+            basename = File.basename(dest_file)
+            Mailer.send_message(:to => recipient, 
+                                :subject => "New rpm #{basename}", 
+                                :body => "New rpm downloaded\n#{file_uri} => #{dest_file}")
+          Logger.log(1, "Notification message sent to #{recipient}")
           end
+        end
+        if @options[:sign] == true then
+          sign_rpm(dest_file)
+        end
+        if @options[:perms].nil? == false then
+          setperms(dest_file, @options[:perms])
         end
       end
     }
   end
 
-  def log(message)
-    if @options[:verbose] == true then
-      puts message
+  def sign_rpm(dest_file)
+    Logger.log(2, "Calling /bin/rpm --addsign #{dest_file}:")
+    sign_success = false
+    while sign_success == false
+      popen3('/bin/rpm', '--addsign', dest_file) do |stdin, stdout, stderr, waitthread|
+        stdin.close_write
+        Logger.log(3, "rpm stdout=#{stdout.read}")
+        errors = stderr.read
+        errors.gsub!(/^gpg: WARNING: standard input reopened\n/, "")
+        # I wish I could find a better way to do this.  But popen3 doesn't return the correct
+        # exit code and popen4 requires ruby 1.9.0p0
+        if errors.downcase =~ /pass phrase check failed/ then
+          print "Incorrect pass phrase.  Try again (y/n) [n]? "
+          response = STDIN.gets.chomp
+          if response.downcase == "n" || response == "" then
+            puts "Exiting. RPM was not signed correctly."
+            Process.exit(1)
+          end
+          # some error other than invalid pass phrase
+        elsif errors.downcase =~ /pass phrase is good/ then
+          sign_success = true
+        else
+          puts errors
+          Process.exit(1)
+        end
+      end # popen3
+    end # while
+  end
+
+  def setperms(dest_file, perms)
+    Logger.log(2, "Calling chmod(#{perms}, #{dest_file})")
+    File.chmod(perms.to_i, dest_file)
+  end
+
+end #class RPM_Repository
+
+
+class Mailer
+
+  def Mailer.send_message(params)
+    to = params[:to] or raise("Mailer.send_message(): required parameter :to was not passed in")
+    subject = params[:subject] or raise("Mailer.send_message(): required parameter :subject was not passed in")
+    body = params[:body] or raise("Mailer.send_message(): required parameter :body was not passed in")
+    from  = "#{Etc.getpwuid.name}@#{Socket.gethostname}\n".chomp
+    
+    msg  = "From: #{from}\n" 
+    msg += "To: #{to}\n"
+    msg += "Subject: #{subject}\n\n"
+    msg += "#{body}\n"
+
+    Net::SMTP.start('localhost', 25) do |smtp|
+      smtp.send_message(msg, from, to)
+      smtp.finish
     end
   end
-end #class RPM_Repository
+
+end
 
 ######################
 #### MAIN ############
 ######################
 def main(args)
   options = { }
-  options[:verbose] = false
   options[:sign] = true
 
   opts = OptionParser.new do |opts|
@@ -129,11 +213,21 @@ def main(args)
       options[:dest_folder] = o
     end
 
+    opts.on("-e[EMAILS]", "--notify=[EMAILS]", "Send notifications to EMAILS when a new rpm is downloaded") do |o|
+      options[:notify_emails] = o
+    end
+
+    opts.on("-p[PERMS]", "--perms=[PERMS]", "Set permissions on downloaded files.  For example, 0644") do |o|
+      options[:perms] = o
+    end
+
     opts.on("--[no-]sign", "Do or don\'t sign downloaded rpm files. Default is to sign rpm files.") do |o|
       options[:sign] = o
     end
 
-    opts.on("-v","--[no-]verbose", "Print information about what is happening") do |o|
+    opts.on("-v", "Print information about what is happening.",
+            "Use multiple times for additional verbosity (e.g. -vvv)") do |o|
+      Logger.increase_verbosity  
       options[:verbose] = o
     end
 
@@ -153,9 +247,9 @@ def main(args)
   end
 
   rpm_repo = RPM_Repository.new(options)
-  rpm_repo.log(" ** Beginning synchronization")
+  Logger.log(1, "Beginning synchronization")
   rpm_repo.synchronize()
-  rpm_repo.log(" ** Done")
+  Logger.log(1, "Done")
 
 end
 

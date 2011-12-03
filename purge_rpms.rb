@@ -1,4 +1,4 @@
-#!/usr/local/bin/ruby
+#!/bin/env ruby
 #
 # purge_rpms.rb - Purge rpm files from a yum repository
 #
@@ -14,6 +14,12 @@ include Open3
 
 # Default value for how many versions of a group of rpms to keep.  A group is determined by the %{NAME} of a rpm
 NUM_RPM_TO_KEEP = 5
+
+
+trap("SIGINT") { throw :ctrl_c }
+catch :ctrl_c do 
+  exit(1)
+end
 
 class RPM_Collection
 
